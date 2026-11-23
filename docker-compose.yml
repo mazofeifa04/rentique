@@ -1,0 +1,36 @@
+# docker compose up -d --build   ->   http://localhost:3000
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: rentique
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rentique}
+      POSTGRES_DB: rentique
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rentique -d rentique"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # No published port: only the app can reach the database.
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://rentique:${POSTGRES_PASSWORD:-rentique}@db:5432/rentique
+      PORT: 3000
+      SEED_DEMO: ${SEED_DEMO:-true}        # load fake data (Alex + Mika) when the database is empty
+      DEMO_LOGIN: ${DEMO_LOGIN:-true}      # show the one-click demo login buttons
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-demo1234}
+      TRUST_PROXY: ${TRUST_PROXY:-1}
+    ports:
+      - "${APP_PORT:-3000}:3000"
+
+volumes:
+  pgdata:

@@ -1,0 +1,16 @@
+{
+  "name": "rentique",
+  "version": "1.0.0",
+  "description": "Marketplace de renta de ropa entre personas, con catalogo para lenders y estadisticas.",
+  "private": true,
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "seed:reset": "node src/seed.js --reset"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "express": "^4.21.2",
+    "pg": "^8.13.1"
+  }
+}
