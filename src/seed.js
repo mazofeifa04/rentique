@@ -47,6 +47,13 @@ const RAW = [
   ['Puffy Tote', 'bags', 'l4', 6, 20, '#ff8a3d', '#f5ecd9', 'grad', 'Quilted oversized tote. Laptop friendly.'],
   ['Croc Shoulder Bag', 'bags', 'l1', 10, 40, '#4a2a22', '#ff8a3d', 'solid', 'Glossy croc-embossed baguette with a gold clasp.'],
 ];
+// Waiting in the moderation queue (no photos: the illustration is the fallback) and one rejected piece.
+const REVIEW = [
+  ['Leopard Slip Dress', 'night', 'l3', 16, 45, '#ff8a3d', '#4a2a22', 'dots', 'Silky leopard slip with an open back. Worn twice.', 'pending', null],
+  ['Chain Link Belt Bag', 'bags', 'l1', 11, 40, '#cfd3e6', '#1b1b2f', 'solid', 'Silver chain strap, fits a phone and a card.', 'pending', null],
+  ['Low-Rise Bootcut Jeans', 'pants', 'l5', 9, 25, '#3f5f9a', '#9ed0ff', 'stripes', 'Dark wash, stretchy, a true 2000s fit.', 'pending', null],
+  ['Designer Handbag Replica', 'bags', 'l2', 45, 200, '#4a2a22', '#ff8a3d', 'solid', 'Looks just like the real thing.', 'rejected', 'We cannot list replica or counterfeit items. List only authentic pieces you own.'],
+];
 const SZ = ['XS', 'S', 'M', 'L', 'XL'];
 const DOS = ['Send a fit pic, I love it', 'Steam it, never iron', 'Return it in the same bag', 'Message me about any snag early', 'Tag me if you post it'];
 const DONTS = ['No smoking in it', 'No pins, hems or alterations', 'No self-tanner', 'No lending it on', 'Keep it away from red wine'];
@@ -67,6 +74,8 @@ async function seed() {
       uid[key] = rows[0].id;
     };
     for (const o of OWNERS) await mk(o.key, o.name, o.email, { ...o, pw: o.demo ? demoHash : 'no-login' });
+    if (!process.env.ADMIN_EMAIL) await mk('admin', 'Super Admin', 'admin@demo.rentique', { pw: demoHash, closet: 'Rentique HQ', city: 'HQ', hue: '#16133F', bio: 'Demo super admin', since: 2022 });
+    if (uid.admin) await c.query("UPDATE users SET role='admin' WHERE id=$1", [uid.admin]);
     await mk('alex', 'Alex Rivera', 'alex@demo.rentique', { pw: demoHash, hue: '#9B6BFF', since: 2025 });
     for (let i = 0; i < CUSTOMERS.length; i++) await mk('c' + i, CUSTOMERS[i], `renter${i}@seed.rentique`, { hue: PAL[i % 5] });
 
@@ -88,11 +97,24 @@ async function seed() {
       items.push({ id: rows[0].id, name: x[0], owner: x[2], rules, sizes: bag ? ['One size'] : SZ.slice(s0, s0 + n) });
     }
 
+    for (const x of REVIEW) {
+      const bag = x[1] === 'bags', i = items.length + 40, r = rng(i);
+      await c.query(
+        `INSERT INTO items(owner_id,name,cat,price,deposit,c1,c2,pat,descr,tile,sizes,rules,status,review_note,reviewed_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+        [uid[x[2]], x[0], x[1], x[3], x[4], x[5], x[6], x[7], x[8], TILES[i % 6], bag ? ['One size'] : ['S', 'M'],
+         { min: 1, max: 4, late: 8, pickup: OWNERS.find((o) => o.key === x[2]).city + ' pickup, or a courier for $4', cleaning: 'I handle the cleaning after every rental', dos: ['Steam it, never iron'], donts: ['No smoking in it'] },
+         x[9], x[10], x[9] === 'rejected' ? new Date() : null]);
+    }
+
     // booking history
     const booked = {}; // item id -> [[s,e]]
+    const made = []; // every booking, to hang conversations on
     const add = async (it, cust, s, e, status, created) => {
       (booked[it.id] = booked[it.id] || []).push([s, e]);
-      await c.query('INSERT INTO bookings(item_id,customer_id,start_day,end_day,status,size,created_day) VALUES($1,$2,$3,$4,$5,$6,$7)', [it.id, cust, s, e, status, it.sizes[0], created]);
+      const { rows } = await c.query('INSERT INTO bookings(item_id,customer_id,start_day,end_day,status,size,created_day) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id', [it.id, cust, s, e, status, it.sizes[0], created]);
+      made.push({ id: rows[0].id, item: it, cust, s, e, status, created });
+      return rows[0].id;
     };
     for (let k = 0; k < items.length; k++) {
       const it = items[k], r = rng(it.id * 977 + 3), busy = it.owner === 'l1';
@@ -119,6 +141,51 @@ async function seed() {
     }
     for (const n of ['Disco Ball Sequin', 'Velvet Wine Wrap', 'Oversized Varsity', 'Mini Baguette Bag'])
       await c.query('INSERT INTO saves(user_id,item_id) VALUES($1,$2)', [uid.alex, byName(n).id]);
+
+    // ---- fake conversations: one thread per renter + lender pair, messages tied to each rental ----
+    const nowS = Date.now() / 1000;
+    const thread = async (renter, lender) => (await c.query('INSERT INTO threads(renter_id,lender_id) VALUES($1,$2) ON CONFLICT (renter_id,lender_id) DO UPDATE SET renter_id=EXCLUDED.renter_id RETURNING id', [renter, lender])).rows[0].id;
+    const say = async (tid, from, booking, body, hoursAfterCreated, unread = false) => {
+      const b = made.find((m) => m.id === booking), ts = Math.min(nowS - 60, (b.created * 86400) + 36000 + hoursAfterCreated * 3600);
+      await c.query('INSERT INTO messages(thread_id,sender_id,booking_id,body,created_at,read_at) VALUES($1,$2,$3,$4,to_timestamp($5),$6)', [tid, from, booking, body, ts, unread ? null : new Date((ts + 1800) * 1000)]);
+    };
+    const ownerKey = (b) => OWNERS.find((o) => RAW.find((r) => r[0] === b.item.name)[2] === o.key).key;
+    const alexB = (name) => made.find((m) => m.cust === uid.alex && m.item.name === name);
+
+    let b = alexB('Satin Bomber'), t = await thread(uid.alex, uid.l1);
+    await say(t, uid.alex, b.id, 'Hi Mika! Is the bomber really reversible? I want it for a festival on ' + new Date((b.s) * 864e5).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' }) + '.', 0);
+    await say(t, uid.l1, b.id, 'Hey Alex! Yes, lime on one side and black on the other. Is pickup Downtown ok?', 2);
+    await say(t, uid.alex, b.id, 'Perfect, I can grab it the day before.', 3);
+    await say(t, uid.l1, b.id, 'Great! I will leave it with the front desk if I am out. Send me a pic when you wear it!', 5, true);
+    b = alexB('Velvet Wine Wrap'); t = await thread(uid.alex, uid.l4);
+    await say(t, uid.alex, b.id, 'Quick question: is the wrap fully lined?', 0);
+    await say(t, uid.l4, b.id, 'Fully lined and stretchy, you will be comfortable all night.', 1);
+    await say(t, uid.alex, b.id, 'Returned it today, thank you so much!', 60);
+    await say(t, uid.l4, b.id, 'Got it, thanks Alex! Come back anytime.', 62);
+    b = alexB('Puffer in Bubblegum'); t = await thread(uid.alex, uid.l3);
+    await say(t, uid.l3, b.id, 'Confirmed! I will steam it before you pick it up.', 1);
+    await say(t, uid.alex, b.id, 'Thank you!! Can I come by after 6?', 2, true);
+
+    // a renter who came back to the same lender: both rentals live in the same conversation
+    const pairs = {};
+    made.filter((m) => m.cust !== uid.alex && m.status !== 'cancelled').forEach((m) => { (pairs[m.cust + ':' + ownerKey(m)] = pairs[m.cust + ':' + ownerKey(m)] || []).push(m); });
+    const repeat = Object.entries(pairs).filter(([k, v]) => k.endsWith(':l1') && v.length >= 2).sort((a, b) => b[1].length - a[1].length)[0];
+    if (repeat) {
+      const [first, second] = repeat[1].sort((a, b) => a.s - b.s), tt = await thread(first.cust, uid.l1);
+      await say(tt, first.cust, first.id, 'Can I pick it up a bit early on Friday?', 0);
+      await say(tt, uid.l1, first.id, 'Sure, 5pm works for me.', 3);
+      await say(tt, first.cust, second.id, 'Back for another one! Same pickup spot?', 0);
+      await say(tt, uid.l1, second.id, 'Love that. Yes, same place. See you then!', 2);
+      await say(tt, first.cust, second.id, 'Perfect, thank you! Could I keep it one extra day if nobody else booked it?', 30, true);
+    }
+    // a few more conversations so the admin has plenty to read
+    const lines = [['Is it true to size?', 'Runs a little small, I would size up.'], ['Can you pin a hem?', 'No alterations, sorry, but it is adjustable at the waist.'], ['Thanks, returned!', 'Received, all good!']];
+    let n = 0;
+    for (const [k, v] of Object.entries(pairs)) {
+      if (n >= 6 || k.endsWith(':l1')) continue;
+      const m = v[0], tt = await thread(m.cust, uid[ownerKey(m)]), L = lines[n % 3];
+      await say(tt, m.cust, m.id, L[0], 0); await say(tt, uid[ownerKey(m)], m.id, L[1], 4); n++;
+    }
   });
 }
 

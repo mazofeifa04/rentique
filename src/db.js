@@ -72,6 +72,32 @@ CREATE TABLE IF NOT EXISTS saves (
   item_id INT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
   PRIMARY KEY (user_id, item_id)
 );
+
+-- v2: super admin, moderation, chat (idempotent, safe on existing databases)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS suspended BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE items ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'approved';
+ALTER TABLE items ADD COLUMN IF NOT EXISTS review_note TEXT;
+ALTER TABLE items ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
+ALTER TABLE items ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ NOT NULL DEFAULT now();
+CREATE INDEX IF NOT EXISTS items_status_idx ON items(status) WHERE NOT deleted;
+CREATE TABLE IF NOT EXISTS threads (
+  id         SERIAL PRIMARY KEY,
+  renter_id  INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  lender_id  INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (renter_id, lender_id)
+);
+CREATE TABLE IF NOT EXISTS messages (
+  id         SERIAL PRIMARY KEY,
+  thread_id  INT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+  sender_id  INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  booking_id INT REFERENCES bookings(id) ON DELETE SET NULL,
+  body       TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  read_at    TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS messages_thread_idx ON messages(thread_id, id);
 `;
 
 async function init() {
@@ -94,7 +120,7 @@ async function tx(fn) {
 }
 
 async function dropAll() {
-  await pool.query('DROP TABLE IF EXISTS saves, bookings, photos, items, sessions, users CASCADE');
+  await pool.query('DROP TABLE IF EXISTS messages, threads, saves, bookings, photos, items, sessions, users CASCADE');
 }
 
 module.exports = { pool, init, tx, dropAll };

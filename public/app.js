@@ -28,6 +28,7 @@ let APP={user:null,items:[],owners:{},people:{},bookings:[],saved:[],demoLogin:f
 async function api(path,method='GET',body){
   const r=await fetch('/api'+path,{method,credentials:'same-origin',headers:{'X-Requested-With':'rentique',...(body!==undefined?{'Content-Type':'application/json'}:{})},body:body!==undefined?JSON.stringify(body):undefined});
   let j=null;try{j=await r.json()}catch(e){}
+  if(r.status===401&&APP.user&&!path.startsWith('/auth/')){APP.user=null;renderHeader();toast('Your session ended. Log in again.')}
   if(!r.ok)throw Object.assign(new Error((j&&j.error)||'Something went wrong. Try again.'),{status:r.status});
   return j;
 }
@@ -38,6 +39,7 @@ const me=()=>APP.user;
 const ownerOf=id=>APP.owners[id]||{id,name:'A lender',closet:'A closet',city:'Near you',rating:null,resp:'New lender',since:new Date().getFullYear(),hue:'#FF3D8B',bio:''};
 const custOf=id=>APP.people[id]||{id,name:'Renter',hue:'#9B6BFF'};
 const allItems=()=>APP.items;
+const pubItems=()=>APP.items.filter(i=>i.status==='approved'&&i.live!==false); // what Explore shows to everyone, admin included
 const itemById=id=>APP.items.find(i=>i.id===String(id));
 const allBk=()=>APP.bookings;
 const blockedSet=(id,bks)=>{const m=new Map();(bks||allBk()).forEach(b=>{if(b.item===id&&(b.status==='confirmed'||b.status==='pending'))for(let d=b.start;d<=b.end;d++)m.set(d,b.status)});return m};
@@ -89,18 +91,22 @@ function confetti(){
 /* ---------- header ---------- */
 function renderHeader(){
   const r=route().name,u=me();
-  $('#nav').innerHTML=[['home','Home'],['explore','Explore'],['studio','Lend']].map(([k,l])=>`<a href="#${k}" class="${r===k||(k==='explore'&&r==='item')?'on':''}">${l}</a>`).join('');
+  const links=[['home','Home'],['explore','Explore']];
+  if(u&&u.role==='admin')links.push(['admin','Admin'+(APP.pendingReview?`<b class="nb">${APP.pendingReview}</b>`:'')]);
+  else{links.push(['studio','Lend']);if(u)links.push(['messages','Messages'+(APP.unread?`<b class="nb">${APP.unread}</b>`:'')])}
+  $('#nav').innerHTML=links.map(([k,l])=>`<a href="#${k}" class="${r===k||(k==='explore'&&r==='item')?'on':''}">${l}</a>`).join('');
   $('#tools').innerHTML=`<button class="ibtn" data-act="theme" aria-label="Switch light or dark theme"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><path d="M21 13A9 9 0 1 1 11 3a7 7 0 0 0 10 10z"/></svg></button>
   <a class="ibtn" href="#me" aria-label="Saved pieces">${HEART.replace('<svg','<svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4"')}${APP.saved.length?`<b>${APP.saved.length}</b>`:''}</a>
   ${u?`<a class="btn sm ghost" href="#me" style="padding-left:8px">${av(u.name,'var(--pink)',26)} ${esc(u.name.split(' ')[0])}</a>`:`<button class="btn sm" data-act="auth">Log in</button>`}`;
 }
 
 /* ---------- router ---------- */
-function route(){const h=location.hash.slice(1)||'home';if(h.startsWith('item-'))return{name:'item',id:h.slice(5)};return{name:['home','explore','studio','me'].includes(h)?h:'home'}}
+function route(){const h=location.hash.slice(1)||'home';if(h.startsWith('item-'))return{name:'item',id:h.slice(5)};if(h==='messages'||h.startsWith('messages-'))return{name:'messages',id:h.slice(9)};return{name:['home','explore','studio','me','admin'].includes(h)?h:'home'}}
 let lastRoute='';
 function render(keepScroll){
   const r=route();renderHeader();const key=JSON.stringify(r);
-  ({home:vHome,explore:vExplore,item:vItem,studio:vStudio,me:vMe})[r.name](r);
+  clearInterval(MSG.timer);
+  ({home:vHome,explore:vExplore,item:vItem,studio:vStudio,me:vMe,messages:vMessages,admin:vAdmin})[r.name](r);
   document.title=r.name==='item'?((itemById(r.id)||{}).name||'Item')+' · Rentique':'Rentique';
   if(!keepScroll&&key!==lastRoute)window.scrollTo(0,0);lastRoute=key;
 }
@@ -121,7 +127,7 @@ function card(it,i=0){
 const WORDS=['first date','birthday','grad szn','festival','photo dump','big night'];
 let wordTimer;
 function vHome(){
-  const its=allItems(),pop=popularity(),hot=[...its].sort((a,b)=>(pop[b.id]||0)-(pop[a.id]||0)).slice(0,8);
+  const its=pubItems(),pop=popularity(),hot=[...its].sort((a,b)=>(pop[b.id]||0)-(pop[a.id]||0)).slice(0,8);
   const fl=['night','jackets','pants'].map(c=>its.find(i=>i.cat===c)).filter(Boolean);
   $('#app').innerHTML=`
   <section class="hero"><div>
@@ -158,7 +164,7 @@ document.addEventListener('pointerout',e=>{const c=e.target.closest&&e.target.cl
 const F={q:'',cat:'all',size:'',sort:'popular',max:30,from:'',to:'',owner:''};
 function filtered(){
   const pop=popularity(),a=pdate(F.from),b=pdate(F.to)||a;
-  let L=allItems().filter(i=>i.live!==false&&(F.cat==='all'||i.cat===F.cat)&&(!F.size||i.sizes.includes(F.size))&&i.price<=F.max&&(!F.owner||i.owner===F.owner)
+  let L=pubItems().filter(i=>(F.cat==='all'||i.cat===F.cat)&&(!F.size||i.sizes.includes(F.size))&&i.price<=F.max&&(!F.owner||i.owner===F.owner)
     &&(!F.q||(i.name+' '+ownerOf(i.owner).closet+' '+CAT[i.cat].name).toLowerCase().includes(F.q.toLowerCase())));
   if(a!=null){L=L.filter(i=>{const bs=blockedSet(i.id);for(let d=a;d<=Math.max(a,b);d++)if(bs.has(d))return false;return true})}
   const s={popular:(x,y)=>(pop[y.id]||0)-(pop[x.id]||0),'price-asc':(x,y)=>x.price-y.price,'price-desc':(x,y)=>y.price-x.price,new:(x,y)=>String(y.id).localeCompare(String(x.id),'en',{numeric:true})}[F.sort];
@@ -186,8 +192,8 @@ let P={id:null,s:null,e:null,size:null,y:0,m:0};
 function vItem(r){
   const it=itemById(r.id);
   if(!it){$('#app').innerHTML=`<div class="gate"><h1>That piece is gone</h1><p>It may have been removed by its lender.</p><a class="btn" href="#explore">Back to Explore</a></div>`;return}
-  if(P.id!==it.id){const d=dd(TODAY);P={id:it.id,ph:0,s:null,e:null,size:it.sizes[0],y:d.getUTCFullYear(),m:d.getUTCMonth()}}
-  const o=ownerOf(it.owner),c=CAT[it.cat],R=it.rules,its=allItems().filter(i=>i.owner===it.owner),done=allBk().filter(b=>its.some(i=>i.id===b.item)&&b.status==='completed').length;
+  if(P.id!==it.id){const d=dd(TODAY);P={id:it.id,ph:0,msg:'',s:null,e:null,size:it.sizes[0],y:d.getUTCFullYear(),m:d.getUTCMonth()}}
+  const o=ownerOf(it.owner),c=CAT[it.cat],R=it.rules,its=pubItems().filter(i=>i.owner===it.owner),done=allBk().filter(b=>its.some(i=>i.id===b.item)&&b.status==='completed').length;
   $('#app').innerHTML=`<a class="back" href="#explore">← All fits</a>
   <div class="ip"><div class="bigart" style="background:${it.tile}"><span id="bigimg" style="display:contents">${itemArt(it,P.ph||0)}</span>${it.photos&&it.photos.length>1?`<div class="gal">${it.photos.map((d,i)=>`<button data-act="ph" data-id="${i}" class="${(P.ph||0)===i?'on':''}" aria-label="Photo ${i+1}"><img class="ph" src="${d}" alt=""></button>`).join('')}</div>`:''}<span class="stk a" style="right:6%;top:6%;--r:6deg">${esc(c.name)}</span></div>
   <div><p class="eyebrow">${esc(c.name)} · ${esc(o.city)}</p><h1 style="margin-top:10px">${esc(it.name)}</h1>
@@ -206,11 +212,13 @@ function vItem(r){
   <div class="rstats"><div><b>${o.rating?'★ '+o.rating:'New'}</b><span>rating</span></div><div><b>${esc(o.resp)}</b><span>replies</span></div><div><b>${its.length}</b><span>pieces</span></div>${done?`<div><b>${done}</b><span>rentals done</span></div>`:''}</div>
   <button class="btn sm ghost" data-act="closet" data-id="${o.id}">See closet</button></div></div>
   </div></div>
-  ${(()=>{const m=allItems().filter(i=>i.owner===it.owner&&i.id!==it.id).slice(0,4);return m.length?`<section class="blk"><div class="sh"><h2>More from ${esc(o.closet)}</h2></div><div class="grid">${m.map((x,i)=>card(x,i)).join('')}</div></section>`:''})()}`;
+  ${(()=>{const m=pubItems().filter(i=>i.owner===it.owner&&i.id!==it.id).slice(0,4);return m.length?`<section class="blk"><div class="sh"><h2>More from ${esc(o.closet)}</h2></div><div class="grid">${m.map((x,i)=>card(x,i)).join('')}</div></section>`:''})()}`;
   drawPanel(it);
 }
 function drawPanel(it){
-  const el=$('#panel');if(!el)return;const bs=blockedSet(it.id),R=it.rules;
+  const el=$('#panel');if(!el)return;
+  if(it.status!=='approved'){const me2=me(),own=me2&&me2.id===it.owner;el.innerHTML=`<h4>${it.status==='rejected'?'Not approved':'Waiting for review'}</h4><p>${it.status==='rejected'?esc(it.reviewNote||'This piece was not approved.'):'This piece is being reviewed by the Rentique team. Rentals open as soon as it is approved.'}</p>${own?`<a class="btn pink" href="#studio" data-act="stab" data-id="catalog">Open my catalog</a>`:'<p class="note">Only the lender and the Rentique team can see this piece right now.</p>'}`;return}
+  const bs=blockedSet(it.id),R=it.rules;
   const first=Date.UTC(P.y,P.m,1)/864e5,off=wd(first),dim=new Date(Date.UTC(P.y,P.m+1,0)).getUTCDate(),canPrev=Date.UTC(P.y,P.m,1)/864e5>TODAY-31;
   let cells='';for(let i=0;i<off;i++)cells+='<span></span>';
   for(let k=1;k<=dim;k++){const d=first+k-1,st=bs.get(d),past=d<TODAY;let c='d';
@@ -228,6 +236,7 @@ function drawPanel(it){
   <div class="legend"><span><i style="background:var(--blue)"></i>Your dates</span><span><i style="background:repeating-linear-gradient(135deg,var(--soft) 0 4px,transparent 4px 8px)"></i>Booked</span><span><i style="background:repeating-linear-gradient(135deg,var(--tang) 0 3px,transparent 3px 7px)"></i>Requested</span></div></div>
   <div class="sum">${days?`<div class="row"><span>${fmt(P.s)}${P.e!=null?' → '+fmt(P.e):''} · ${days} day${days>1?'s':''} × ${money(it.price)}</span><b>${money(sub)}</b></div><div class="row"><span>Rentique fee (8%)</span><b>${money(fee)}</b></div><div class="row"><span>Deposit held, returned after</span><b>${money(it.deposit)}</b></div><div class="row tot"><span>Pay now</span><span>${money(sub+fee)}</span></div>
   ${bad?`<p class="note" style="color:var(--bad)">This lender allows ${R.min===R.max?R.min:R.min+' to '+R.max} days per rental.</p>`:''}`:'<p class="note">Tap a start day, then an end day. Same day works for a one-day rental.</p>'}</div>
+  <label class="field"><span>Message to ${esc(ownerOf(it.owner).name.split(' ')[0])} (optional)</span><textarea id="rmsg" rows="2" maxlength="1000" placeholder="Pickup time, fit questions, what it's for…">${esc(P.msg||'')}</textarea></label>
   <button class="btn pink" data-act="rent" data-id="${it.id}" ${days&&!bad?'':'disabled'}>Request to rent</button>
   <p class="note">You are not charged until ${esc(ownerOf(it.owner).name.split(' ')[0])} confirms. Demo only, no real payment.</p>`;
 }
@@ -242,7 +251,7 @@ function authModal(tab='login'){
   <p class="note" id="aerr" role="alert" style="color:var(--bad)"></p>
   <button class="btn" type="submit">${tab==='login'?'Log in':'Create account'}</button>
   <p class="note">Passwords are stored hashed on the server. Use at least 8 characters.</p></form>
-  ${APP.demoLogin?`<div class="frow" style="border-top:2px dashed var(--soft);padding-top:14px"><span class="note" style="flex:1 1 100%">Just looking? Jump in as a demo user with fake data.</span><button class="btn sm ghost" data-act="demo" data-id="alex">Demo renter (Alex)</button><button class="btn sm ghost" data-act="demo" data-id="mika">Demo lender (Mika)</button></div>`:''}`);
+  ${APP.demoLogin?`<div class="frow" style="border-top:2px dashed var(--soft);padding-top:14px"><span class="note" style="flex:1 1 100%">Just looking? Jump in as a demo user with fake data.</span><button class="btn sm ghost" data-act="demo" data-id="alex">Demo renter (Alex)</button><button class="btn sm ghost" data-act="demo" data-id="mika">Demo lender (Mika)</button><button class="btn sm ghost" data-act="demo" data-id="admin">Super admin</button></div>`:''}`);
 }
 async function afterLogin(){await refresh();closeModal();toast('You are in. Welcome!');const f=afterAuth;afterAuth=null;render(true);f&&f()}
 document.addEventListener('submit',async e=>{
@@ -261,9 +270,9 @@ function vMe(){
   const u=me();
   if(!u){$('#app').innerHTML=`<div class="gate"><h1>Your account</h1><p>Log in to see your rentals and saved fits.</p><button class="btn" data-act="auth">Log in or sign up</button></div>`;return}
   const mine=allBk().filter(b=>b.cust===u.id).sort((a,b)=>b.start-a.start),sv=APP.saved.map(itemById).filter(Boolean);
-  $('#app').innerHTML=`<div class="stu-h"><div><p class="eyebrow">account</p><h1>Hey ${esc(u.name.split(' ')[0])}.</h1></div><div class="frow"><a class="btn pink" href="#studio">My closet</a><button class="btn ghost" data-act="logout">Log out</button></div></div>
+  $('#app').innerHTML=`<div class="stu-h"><div><p class="eyebrow">account</p><h1>Hey ${esc(u.name.split(' ')[0])}.</h1></div><div class="frow">${u.role==='admin'?'<a class="btn pink" href="#admin">Admin</a>':'<a class="btn pink" href="#studio">My closet</a>'}<button class="btn ghost" data-act="logout">Log out</button></div></div>
   <div class="tabs">${[['rentals','My rentals ('+mine.length+')'],['saved','Saved ('+sv.length+')']].map(([k,l])=>`<button class="chip ${MT===k?'on':''}" data-act="mtab" data-id="${k}">${l}</button>`).join('')}</div>
-  ${MT==='rentals'?(mine.length?`<div class="list">${mine.map(b=>{const it=itemById(b.item);if(!it)return'';return `<div class="req"><div class="th" style="background:${it.tile}">${itemArt(it)}</div><div class="who"><b><a href="#item-${it.id}">${esc(it.name)}</a></b><span>${fmt(b.start)}${b.end>b.start?' → '+fmt(b.end):''} · ${b.end-b.start+1} day(s) · ${esc(ownerOf(it.owner).closet)}</span></div><span class="pill ${b.status}">${b.status}</span><b>${money((b.end-b.start+1)*it.price)}</b>${b.status==='pending'||(b.status==='confirmed'&&b.start>TODAY)?`<button class="btn sm ghost" data-act="cancel" data-id="${b.id}">Cancel</button>`:''}</div>`}).join('')}</div>`:`<div class="empty"><h3>No rentals yet</h3><p>Find something for your next plan.</p><a class="btn" href="#explore">Explore fits</a></div>`)
+  ${MT==='rentals'?(mine.length?`<div class="list">${mine.map(b=>{const it=itemById(b.item);if(!it)return'';return `<div class="req"><div class="th" style="background:${it.tile}">${itemArt(it)}</div><div class="who"><b><a href="#item-${it.id}">${esc(it.name)}</a></b><span>${fmt(b.start)}${b.end>b.start?' → '+fmt(b.end):''} · ${b.end-b.start+1} day(s) · ${esc(ownerOf(it.owner).closet)}</span></div><span class="pill ${b.status}">${b.status}</span><b>${money((b.end-b.start+1)*it.price)}</b><button class="btn sm ghost" data-act="chat" data-id="${b.id}">Message</button>${b.status==='pending'||(b.status==='confirmed'&&b.start>TODAY)?`<button class="btn sm ghost" data-act="cancel" data-id="${b.id}">Cancel</button>`:''}</div>`}).join('')}</div>`:`<div class="empty"><h3>No rentals yet</h3><p>Find something for your next plan.</p><a class="btn" href="#explore">Explore fits</a></div>`)
    :(sv.length?`<div class="grid">${sv.map((it,i)=>card(it,i)).join('')}</div>`:`<div class="empty"><h3>Nothing saved</h3><p>Tap the heart on any piece to keep it here.</p><a class="btn" href="#explore">Explore fits</a></div>`)}`;
 }
 
@@ -275,7 +284,7 @@ function statsFor(oid,from,to){
   allBk().filter(b=>by[b.item]&&(b.status==='completed'||b.status==='confirmed')&&b.start<=TODAY).forEach(b=>{const it=by[b.item],len=b.end-b.start+1;
     if(b.start>=from&&b.start<=to){R.cnt++;R.lenSum+=len;R.lead+=Math.max(0,b.start-b.created);R.weekday[wd(b.start)]++;const k=Math.min(len,5);R.lens[k]=(R.lens[k]||0)+1;(R.perCust[b.cust]=R.perCust[b.cust]||{n:0,spent:0}).n++;(R.perItem[it.id]=R.perItem[it.id]||{n:0,days:0,rev:0}).n++}
     for(let d=Math.max(b.start,from);d<=Math.min(b.end,to);d++){R.days++;R.rev+=it.price;R.daily[d]=(R.daily[d]||0)+it.price;const pi=(R.perItem[it.id]=R.perItem[it.id]||{n:0,days:0,rev:0});pi.days++;pi.rev+=it.price;R.perCat[it.cat]=(R.perCat[it.cat]||0)+it.price;(R.perCust[b.cust]=R.perCust[b.cust]||{n:0,spent:0}).spent+=it.price}});
-  R.live=its.filter(i=>i.live!==false).length;R.util=R.live?R.days/(R.live*(to-from+1)):0;return R;
+  R.live=its.filter(i=>i.live!==false&&i.status==='approved').length;R.util=R.live?R.days/(R.live*(to-from+1)):0;return R;
 }
 const niceStep=v=>{const p=Math.pow(10,Math.floor(Math.log10(v))),n=v/p;return(n<=1?1:n<=2?2:n<=5?5:10)*p};
 function areaChart(vals,days){
@@ -299,6 +308,7 @@ function vStudio(){
   const o=ownerOf(u.id),R=STU.range,to=TODAY,from=to-R+1,S=statsFor(u.id,from,to),Pv=statsFor(u.id,from-R,from-1),mine=allItems().filter(i=>i.owner===u.id);
   const reqs=allBk().filter(b=>mine.some(i=>i.id===b.item)&&b.status==='pending').sort((a,b)=>a.start-b.start);
   $('#app').innerHTML=`<div class="stu-h"><div><p class="eyebrow">lender studio · ${esc(o.city)}</p><h1>${esc(o.closet)}</h1></div><div class="frow"><button class="btn ghost" data-act="editcloset">Edit closet</button><button class="btn pink" data-act="additem">+ List a piece</button></div></div>
+  ${(()=>{const w=mine.filter(i=>i.status==='pending').length,x=mine.filter(i=>i.status==='rejected').length;return w||x?`<div class="banner"><b>${w?w+' piece'+(w>1?'s':'')+' waiting for review':''}${w&&x?' · ':''}${x?x+' need'+(x>1?'':'s')+' changes':''}</b><span>New pieces go live after the Rentique team approves the photos, details and price.</span><button class="btn sm" data-act="stab" data-id="catalog">See catalog</button></div>`:''})()}
   <div class="tabs">${[['overview','Stats'],['catalog','Catalog ('+mine.length+')'],['requests','Requests ('+reqs.length+')']].map(([k,l])=>`<button class="chip ${STU.tab===k?'on':''}" data-act="stab" data-id="${k}">${l}</button>`).join('')}
   ${STU.tab==='overview'?`<span style="flex:1"></span>${[30,60,90].map(r=>`<button class="chip ${R===r?'on':''}" data-act="srange" data-id="${r}">${r} days</button>`).join('')}`:''}</div>
   ${STU.tab==='overview'?stuOverview(S,Pv,from,to,R,mine):STU.tab==='catalog'?stuCatalog(mine,u.id):stuReqs(u.id,reqs)}`;
@@ -330,44 +340,57 @@ function stuOverview(S,Pv,from,to,R,mine){
   </div>`;
 }
 function stuCatalog(mine,uid){
-  if(!mine.length)return `<div class="empty"><h3>Your catalog is empty</h3><p>List a piece in under a minute.</p><button class="btn pink" data-act="additem">+ List a piece</button></div>`;
+  if(!mine.length)return `<div class="empty"><h3>Your catalog is empty</h3><p>List a piece in under a minute. Our team reviews it before it goes live.</p><button class="btn pink" data-act="additem">+ List a piece</button></div>`;
   const S=statsFor(uid,TODAY-29,TODAY);
-  return `<div class="cat-grid">${mine.map(it=>{const s=S.perItem[it.id]||{n:0,days:0,rev:0};return `<div class="mine ${it.live===false?'paused':''}"><div class="th" style="background:${it.tile}">${itemArt(it)}</div><div><h4><a href="#item-${it.id}">${esc(it.name)}</a></h4><p class="st">${esc(CAT[it.cat].name)} · ${esc(it.sizes.join(', '))}</p><p class="st">30 days: ${s.n} rentals · ${money(s.rev)} · ${Math.round(s.days/30*100)}% used</p></div>
-  <div class="ctl"><span class="stepper"><button data-act="pdown" data-id="${it.id}" aria-label="Lower price">−</button><b>${money(it.price)}/day</b><button data-act="pup" data-id="${it.id}" aria-label="Raise price">+</button></span>
-  <button class="chip" data-act="photos" data-id="${it.id}">${it.photos&&it.photos.length?'Change photos':'Add photos'}</button><button class="chip" data-act="pause" data-id="${it.id}">${it.live===false?'Paused · resume':'Live · pause'}</button><button class="chip" data-act="del" data-id="${it.id}" aria-label="Remove ${esc(it.name)}">Remove</button></div></div>`}).join('')}</div>`;
+  const pill=it=>it.status==='pending'?'<span class="pill pending">In review</span>':it.status==='rejected'?'<span class="pill rejected">Needs changes</span>':it.live===false?'<span class="pill completed">Paused</span>':'<span class="pill approved">Live</span>';
+  const rm=it=>`<button class="chip" data-act="del" data-id="${it.id}" aria-label="Remove ${esc(it.name)}">Remove</button>`;
+  return `<div class="cat-grid">${mine.map(it=>{const s=S.perItem[it.id]||{n:0,days:0,rev:0};
+    const info=it.status==='approved'?`<p class="st">30 days: ${s.n} rentals · ${money(s.rev)} · ${Math.round(s.days/30*100)}% used</p>`:it.status==='pending'?`<p class="st">Waiting for the Rentique team${it.reviewNote?' · '+esc(it.reviewNote):''}</p>`:`<p class="st why">${esc(it.reviewNote||'Not approved.')}</p>`;
+    const ctl=it.status==='approved'?`<span class="stepper"><button data-act="pdown" data-id="${it.id}" aria-label="Lower price">−</button><b>${money(it.price)}/day</b><button data-act="pup" data-id="${it.id}" aria-label="Raise price">+</button></span>
+      <button class="chip" data-act="photos" data-id="${it.id}">${it.photos&&it.photos.length?'Change photos':'Add photos'}</button><button class="chip" data-act="pause" data-id="${it.id}">${it.live===false?'Paused · resume':'Live · pause'}</button>${rm(it)}`
+      :`<button class="chip ${it.status==='rejected'?'on':''}" data-act="edititem" data-id="${it.id}">${it.status==='rejected'?'Edit and resubmit':'Edit'}</button>${rm(it)}`;
+    return `<div class="mine ${it.live===false||it.status!=='approved'?'paused':''}"><div class="th" style="background:${it.tile}">${itemArt(it)}</div><div><div class="row" style="justify-content:flex-start;gap:8px;flex-wrap:wrap"><h4><a href="#item-${it.id}">${esc(it.name)}</a></h4>${pill(it)}</div><p class="st">${esc(CAT[it.cat].name)} · ${esc(it.sizes.join(', '))} · ${money(it.price)}/day</p>${info}</div>
+    <div class="ctl">${ctl}</div></div>`}).join('')}</div>`;
 }
 function stuReqs(uid,reqs){
   const mine=allItems().filter(i=>i.owner===uid),up=allBk().filter(b=>mine.some(i=>i.id===b.item)&&b.status==='confirmed'&&b.end>=TODAY).sort((a,b)=>a.start-b.start).slice(0,8);
-  const row=(b,act)=>{const it=itemById(b.item),c=custOf(b.cust);if(!it)return'';return `<div class="req"><div class="th" style="background:${it.tile}">${itemArt(it)}</div><div class="who"><b>${esc(c.name)} · ${esc(it.name)}</b><span>${fmt(b.start,{weekday:'short',month:'short',day:'numeric'})}${b.end>b.start?' → '+fmt(b.end):''} · ${b.end-b.start+1} day(s) · ${money((b.end-b.start+1)*it.price)}</span></div>${act?`<button class="btn sm" data-act="approve" data-id="${b.id}">Approve</button><button class="btn sm ghost" data-act="decline" data-id="${b.id}">Decline</button>`:`<span class="pill confirmed">confirmed</span>`}</div>`};
+  const row=(b,act)=>{const it=itemById(b.item),c=custOf(b.cust);if(!it)return'';return `<div class="req"><div class="th" style="background:${it.tile}">${itemArt(it)}</div><div class="who"><b>${esc(c.name)} · ${esc(it.name)}</b><span>${fmt(b.start,{weekday:'short',month:'short',day:'numeric'})}${b.end>b.start?' → '+fmt(b.end):''} · ${b.end-b.start+1} day(s) · ${money((b.end-b.start+1)*it.price)}</span></div><button class="btn sm ghost" data-act="chat" data-id="${b.id}">Chat</button>${act?`<button class="btn sm" data-act="approve" data-id="${b.id}">Approve</button><button class="btn sm ghost" data-act="decline" data-id="${b.id}">Decline</button>`:`<span class="pill confirmed">confirmed</span>`}</div>`};
   return `<div class="dash"><div class="box w12"><h3>Waiting on you</h3>${reqs.length?`<div class="list">${reqs.map(b=>row(b,1)).join('')}</div>`:'<p class="note">All caught up. New requests appear here.</p>'}</div>
   <div class="box w12"><h3>Coming up</h3>${up.length?`<div class="list">${up.map(b=>row(b,0)).join('')}</div>`:'<p class="note">Nothing confirmed yet.</p>'}</div></div>`;
 }
-function itemForm(){
-  const sw=(name,vals,cur)=>vals.map((v,i)=>`<label><input type="radio" name="${name}" value="${v}" ${i===cur?'checked':''}><span class="c" style="background:${v}" title="${v}"></span></label>`).join('');
+function itemForm(it){
+  const v=it||{},rl=v.rules||{};
   const COL=['#1b1b2f','#cfd3e6','#f5ecd9','#ff3d8b','#e02c3a','#ff8a3d','#c9f53b','#8fbf9f','#2d3bff','#9ed0ff','#cdb4ff','#7a1233'];
-  openModal(`<h2>List a piece</h2><form class="form" id="itemf"><div style="display:grid;grid-template-columns:1fr 170px;gap:16px;align-items:start" class="two">
-  <div class="form"><label class="field"><span>Name</span><input name="name" required maxlength="40" placeholder="e.g. Silver Mesh Halter"></label>
-  <div class="two"><label class="field"><span>Theme</span><select name="cat">${CATS.map(c=>`<option value="${c.id}">${c.name}</option>`).join('')}</select></label>
-  <label class="field"><span>Pattern</span><select name="pat">${['solid','stripes','dots','checks','stars','grad'].map(p=>`<option>${p}</option>`).join('')}</select></label></div></div>
+  const sw=(name,cur,dflt)=>{const list=cur&&!COL.includes(cur)?[...COL,cur]:COL,sel=cur||dflt;return list.map(c=>`<label><input type="radio" name="${name}" value="${c}" ${c===sel?'checked':''}><span class="c" style="background:${c}" title="${c}"></span></label>`).join('')};
+  const sizes=v.sizes||['M'];
+  openModal(`<h2>${it?(it.status==='rejected'?'Edit and resubmit':'Edit piece'):'List a piece'}</h2>
+  <p class="note" style="margin-top:-6px">${it&&it.status==='rejected'?'Fix what the team asked for and send it back for review.':'Every new piece is reviewed by the Rentique team before it appears in Explore. We check the photos, details and price, usually within a day.'}</p>
+  ${it&&it.status==='rejected'&&it.reviewNote?`<div class="banner"><b>Why it was rejected</b><span>${esc(it.reviewNote)}</span></div>`:''}
+  <form class="form" id="itemf" data-edit="${it?esc(it.id):''}"><div style="display:grid;grid-template-columns:1fr 170px;gap:16px;align-items:start" class="two">
+  <div class="form"><label class="field"><span>Name</span><input name="name" required maxlength="40" placeholder="e.g. Silver Mesh Halter" value="${esc(v.name||'')}"></label>
+  <div class="two"><label class="field"><span>Theme</span><select name="cat">${CATS.map(c=>`<option value="${c.id}" ${v.cat===c.id?'selected':''}>${c.name}</option>`).join('')}</select></label>
+  <label class="field"><span>Pattern</span><select name="pat">${['solid','stripes','dots','checks','stars','grad'].map(p=>`<option ${v.pat===p?'selected':''}>${p}</option>`).join('')}</select></label></div></div>
   <div class="prev" id="prev"></div></div>
-  <div class="field"><span>Photos (up to 3, first one is the cover)</span><div class="phs"><label class="btn sm ghost" for="phin" style="cursor:pointer">+ Add photos</label><input id="phin" type="file" accept="image/*" multiple class="sr"><span id="phthumbs" class="phs"></span></div><p class="note">No photos? The illustrated preview is used. Photos stay in your browser in this demo.</p></div>
-  <div class="field"><span>Main color (for the illustration)</span><div class="sw">${sw('c1',COL,0)}</div></div><div class="field"><span>Accent color</span><div class="sw">${sw('c2',COL,3)}</div></div>
-  <div class="two"><label class="field"><span>Price per day ($)</span><input name="price" type="number" min="1" max="500" value="10" required></label><label class="field"><span>Deposit ($)</span><input name="deposit" type="number" min="0" max="500" value="30" required></label></div>
-  <div class="field"><span>Sizes</span><div class="sw">${[...SZ,'One size'].map((s,i)=>`<label><input type="checkbox" name="sz" value="${s}" ${i===2?'checked':''}><span class="chip t">${s}</span></label>`).join('')}</div></div>
-  <div class="two"><label class="field"><span>Max days per rental</span><select name="max">${[2,3,4,5,7,10].map(n=>`<option ${n===5?'selected':''}>${n}</option>`).join('')}</select></label><label class="field"><span>Late fee per day ($)</span><input name="late" type="number" min="0" value="8"></label></div>
-  <label class="field"><span>Do's (comma separated)</span><input name="dos" maxlength="120" placeholder="Steam it, send a fit pic"></label>
-  <label class="field"><span>Don'ts (comma separated)</span><input name="donts" maxlength="120" placeholder="No smoking, no alterations"></label>
-  <label class="field"><span>Description</span><textarea name="desc" rows="2" maxlength="200" placeholder="Fit, feel, what it goes with"></textarea></label>
-  <p class="note" id="ferr" role="alert" style="color:var(--bad)"></p><button class="btn pink" type="submit">Publish to my closet</button></form>`,'wide');
-  FP=[];updPrev();
+  <div class="field"><span>Photos (up to 3, first one is the cover)</span><div class="phs"><label class="btn sm ghost" for="phin" style="cursor:pointer">+ Add photos</label><input id="phin" type="file" accept="image/*" multiple class="sr"><span id="phthumbs" class="phs"></span></div><p class="note">Clear, well-lit photos get approved faster. No photos? The illustrated preview is used.</p></div>
+  <div class="field"><span>Main color (for the illustration)</span><div class="sw">${sw('c1',v.c1,COL[0])}</div></div><div class="field"><span>Accent color</span><div class="sw">${sw('c2',v.c2,COL[3])}</div></div>
+  <div class="two"><label class="field"><span>Price per day ($)</span><input name="price" type="number" min="1" max="500" value="${v.price||10}" required></label><label class="field"><span>Deposit ($)</span><input name="deposit" type="number" min="0" max="500" value="${v.deposit??30}" required></label></div>
+  <div class="field"><span>Sizes</span><div class="sw">${[...SZ,'One size'].map(s=>`<label><input type="checkbox" name="sz" value="${s}" ${sizes.includes(s)?'checked':''}><span class="chip t">${s}</span></label>`).join('')}</div></div>
+  <div class="two"><label class="field"><span>Max days per rental</span><select name="max">${[2,3,4,5,7,10].map(n=>`<option ${n===(rl.max||5)?'selected':''}>${n}</option>`).join('')}</select></label><label class="field"><span>Late fee per day ($)</span><input name="late" type="number" min="0" value="${rl.late??8}"></label></div>
+  <label class="field"><span>Do's (comma separated)</span><input name="dos" maxlength="120" placeholder="Steam it, send a fit pic" value="${esc((rl.dos||[]).join(', '))}"></label>
+  <label class="field"><span>Don'ts (comma separated)</span><input name="donts" maxlength="120" placeholder="No smoking, no alterations" value="${esc((rl.donts||[]).join(', '))}"></label>
+  <label class="field"><span>Description</span><textarea name="desc" rows="2" maxlength="200" placeholder="Fit, feel, what it goes with">${esc(v.desc||'')}</textarea></label>
+  <p class="note" id="ferr" role="alert" style="color:var(--bad)"></p><button class="btn pink" type="submit">Send for review</button></form>`,'wide');
+  FP=(v.photos||[]).slice();drawThumbs();
 }
 function updPrev(){const f=$('#itemf');if(!f)return;const v=n=>(f.elements[n].value);if(FP[0]){$('#prev').innerHTML=`<img class="ph" src="${FP[0]}" alt="Cover preview">`;return}$('#prev').innerHTML=art(CAT[v('cat')].shape,v('c1'),v('c2'),v('pat'),'Preview')}
 async function saveItem(f){
   const g=n=>f.elements[n].value.trim(),sizes=$$('input[name=sz]:checked',f).map(x=>x.value),list=s=>g(s).split(',').map(x=>x.trim()).filter(Boolean);
   if(!sizes.length){$('#ferr').textContent='Pick at least one size.';return}
   const btn=$('button[type=submit]',f);btn.disabled=true;$('#ferr').textContent='';
-  try{await api('/items','POST',{name:g('name'),cat:g('cat'),pat:g('pat'),c1:g('c1'),c2:g('c2'),price:+g('price'),deposit:+g('deposit'),max:+g('max'),late:+g('late')||0,sizes,dos:list('dos'),donts:list('donts'),desc:g('desc'),photos:FP});
-    await refresh();closeModal();STU.tab='catalog';render(true);toast('Listed! It is live in Explore.');confetti()}
+  const eid=f.dataset.edit,body={name:g('name'),cat:g('cat'),pat:g('pat'),c1:g('c1'),c2:g('c2'),price:+g('price'),deposit:+g('deposit'),max:+g('max'),late:+g('late')||0,sizes,dos:list('dos'),donts:list('donts'),desc:g('desc'),photos:FP};
+  try{const r=await api(eid?'/items/'+eid:'/items',eid?'PUT':'POST',body);
+    await refresh();closeModal();STU.tab='catalog';render(true);
+    toast(r.status==='approved'?'Listed! It is live in Explore.':'Sent for review. It goes live once the Rentique team approves it.')}
   catch(e){$('#ferr').textContent=e.message;btn.disabled=false}
 }
 
@@ -404,17 +427,18 @@ document.addEventListener('click',e=>{
     const u=me();if(!u){afterAuth=null;authModal('signup');toast('Log in to send your request');return}
     const m=itemById(id);if(m.owner===u.id){toast("That's your own piece");return}
     const s=P.s,en=P.e??P.s;t.disabled=true;
-    api('/bookings','POST',{item:id,start:s,end:en,size:P.size}).then(async()=>{await refresh();P.s=P.e=null;drawPanel(itemById(id));confetti();const o=ownerOf(m.owner),n=en-s+1;
-      openModal(`<h2>Request sent!</h2><p>${esc(o.name.split(' ')[0])} usually replies in ${esc(o.resp)}. You will find ${esc(m.name)} (${fmt(s)}${n>1?' → '+fmt(en):''}) under My rentals.</p><div class="frow"><a class="btn" href="#me" data-act="close">See my rentals</a><button class="btn ghost" data-act="close">Keep browsing</button></div>`)}).catch(async x=>{toast(x.message);await refresh();drawPanel(itemById(id))});return}
+    api('/bookings','POST',{item:id,start:s,end:en,size:P.size,message:(P.msg||'').trim()||undefined}).then(async r=>{P.msg='';await refresh();P.s=P.e=null;drawPanel(itemById(id));confetti();const o=ownerOf(m.owner),n=en-s+1;
+      openModal(`<h2>Request sent!</h2><p>${esc(o.name.split(' ')[0])} usually replies in ${esc(o.resp)}. You will find ${esc(m.name)} (${fmt(s)}${n>1?' → '+fmt(en):''}) under My rentals.</p><div class="frow"><button class="btn pink" data-act="chat" data-id="${r.id}">Open chat</button><a class="btn" href="#me" data-act="close">See my rentals</a><button class="btn ghost" data-act="close">Keep browsing</button></div>`)}).catch(async x=>{toast(x.message);await refresh();drawPanel(itemById(id))});return}
   if(a==='ph'){P.ph=+id;const m=itemById(P.id);$('#bigimg').innerHTML=itemArt(m,P.ph);$$('.gal button').forEach((b,i)=>b.classList.toggle('on',i===P.ph));return}
   if(a==='phrm'){FP.splice(+id,1);drawThumbs();return}
-  if(a==='photos'){const inp=document.createElement('input');inp.type='file';inp.accept='image/*';inp.multiple=true;inp.onchange=async()=>{const got=await readMany(inp.files,3);if(!got.length)return;mut(()=>api('/items/'+id+'/photos','PUT',{photos:got}),'Photos added',vStudio)};inp.click();return}
+  if(a==='photos'){const inp=document.createElement('input');inp.type='file';inp.accept='image/*';inp.multiple=true;inp.onchange=async()=>{const got=await readMany(inp.files,3);if(!got.length)return;mut(()=>api('/items/'+id+'/photos','PUT',{photos:got}),itemById(id).status==='approved'?'New photos sent for review. The piece is hidden until they are approved.':'Photos updated',vStudio)};inp.click();return}
   if(a==='mtab'){MT=id;vMe();return}
   if(a==='cancel'){mut(()=>api('/bookings/'+id,'PATCH',{status:'cancelled'}),'Rental cancelled',vMe);return}
   if(a==='stab'){STU.tab=id;vStudio();return}
   if(a==='srange'){STU.range=+id;vStudio();return}
   if(a==='additem')return itemForm();
   if(a==='editcloset')return closetModal();
+  if(a==='edititem')return itemForm(itemById(id));
   if(a==='pup'||a==='pdown'){const m=itemById(id);mut(()=>api('/items/'+id,'PATCH',{price:Math.max(1,m.price+(a==='pup'?1:-1))}),null,vStudio);return}
   if(a==='pause'){const m=itemById(id);mut(()=>api('/items/'+id,'PATCH',{live:m.live===false}),null,vStudio);return}
   if(a==='del'){mut(()=>api('/items/'+id,'DELETE'),'Removed from your closet',vStudio);return}
@@ -423,6 +447,7 @@ document.addEventListener('click',e=>{
 });
 document.addEventListener('input',e=>{
   const t=e.target;
+  if(t.id==='rmsg')P.msg=t.value;
   if(t.id==='q'){F.q=t.value;refreshGrid()}
   if(t.id==='fmax'){F.max=+t.value;$('#mx').textContent=money(F.max);refreshGrid()}
   if(t.closest&&t.closest('#itemf'))updPrev();
@@ -439,4 +464,6 @@ document.addEventListener('change',e=>{
 
 /* ---------- boot ---------- */
 try{const th=localStorage.getItem('rentique.theme');if(th)document.documentElement.dataset.theme=th}catch(e){}
-(async()=>{try{await refresh()}catch(e){$('#app').innerHTML='<div class="gate"><h1>Cannot reach the server</h1><p>Check your connection and reload the page.</p></div>';return}render()})();
+const boot=async()=>{try{await refresh()}catch(e){$('#app').innerHTML='<div class="gate"><h1>Cannot reach the server</h1><p>Check your connection and reload the page.</p></div>';return}render()};
+// wait until messages.js and admin.js (also deferred) have run
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',boot);else boot();
